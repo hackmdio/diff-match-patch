@@ -1323,7 +1323,11 @@ diff_match_patch.prototype.diff_toDelta = function(diffs) {
   for (var x = 0; x < diffs.length; x++) {
     switch (diffs[x][0]) {
       case DIFF_INSERT:
-        text[x] = '+' + encodeURI(diffs[x][1]);
+        try {
+          text[x] = '+' + encodeURI(diffs[x][1]);
+        } catch (ex) {
+          text[x] = '+' + diffs[x][1];
+        }
         break;
       case DIFF_DELETE:
         text[x] = '-' + diffs[x][1].length;
@@ -2179,7 +2183,11 @@ diff_match_patch.patch_obj.prototype.toString = function() {
         op = ' ';
         break;
     }
-    text[x + 1] = op + encodeURI(this.diffs[x][1]) + '\n';
+    try {
+      text[x + 1] = op + encodeURI(this.diffs[x][1]) + '\n';
+    } catch (ex) {
+      text[x + 1] = op + this.diffs[x][1] + '\n';
+    }
   }
   return text.join('').replace(/%20/g, ' ');
 };
