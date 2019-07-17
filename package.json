@@ -6,14 +6,14 @@
   "dependencies": {},
   "main": "index.js",
   "devDependencies": {
-    "testit": "~1.1.0"
+    "testit": "^3.1.0"
   },
   "scripts": {
     "test": "node test"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/ForbesLindesay/diff-match-patch.git"
+    "url": "https://github.com/hackmdio/diff-match-patch"
   },
   "license": "Apache-2.0"
 }
