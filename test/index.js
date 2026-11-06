@@ -220,6 +220,30 @@ function testDiffCharsToLines() {
   var diffs = [[DIFF_DELETE, chars]];
   dmp.diff_charsToLines_(diffs, lineList);
   assertEquivalent([[DIFF_DELETE, lines]], diffs);
+
+  // More than 65536 to verify any 16-bit limitation.
+  lineList = [];
+  for (var i = 0; i < 66000; i++) {
+    lineList[i] = i + '\n';
+  }
+  chars = lineList.join('');
+  var results = dmp.diff_linesToChars_(chars, '');
+  diffs = [[DIFF_INSERT, results.chars1]];
+  dmp.diff_charsToLines_(diffs, results.lineArray);
+  assertEquals(chars, diffs[0][1]);
+
+  // Same for text2, and with both texts combined exceeding 65536 unique lines.
+  var lineList2 = [];
+  for (var i = 0; i < 66000; i++) {
+    lineList2[i] = 'b' + i + '\n';
+  }
+  var chars2 = lineList2.join('');
+  results = dmp.diff_linesToChars_(chars, chars2);
+  assertTrue('lineArray within 16 bits', results.lineArray.length <= 65536);
+  diffs = [[DIFF_DELETE, results.chars1], [DIFF_INSERT, results.chars2]];
+  dmp.diff_charsToLines_(diffs, results.lineArray);
+  assertEquals(chars, diffs[0][1]);
+  assertEquals(chars2, diffs[1][1]);
 }
 
 function testDiffCleanupMerge() {
@@ -753,6 +777,48 @@ function testDiffMain() {
 // MATCH TEST FUNCTIONS
 
 
+function testDiffMainManyLines() {
+  // Line-mode diff must stay correct when the two texts together contain
+  // 65536 or more unique lines (String.fromCharCode wraps at 16 bits).
+  var dmp = new diff_match_patch();
+  dmp.Diff_Timeout = 0.1;
+
+  function makeLines(n, prefix) {
+    var list = [];
+    for (var i = 0; i < n; i++) {
+      list[i] = prefix + i.toString(36) + '\n';
+    }
+    return list.join('');
+  }
+
+  // Exactly 65536 unique lines: 98304 chars per text, 3 chars per line, with
+  // no common prefix/suffix so every line reaches diff_linesToChars_.
+  var boundary1 = [];
+  var boundary2 = [];
+  for (var i = 0; i < 32768; i++) {
+    boundary1.push(String.fromCharCode(0x4E00 + (i >> 8), 0x4E00 + (i & 255)) + '\n');
+  }
+  for (var j = 32767; j >= 0; j--) {
+    boundary2.push(String.fromCharCode(0x4F00 + (j >> 8), 0x4E00 + (j & 255)) + '\n');
+  }
+
+  var cases = [
+    [boundary1.join(''), boundary2.join('')],
+    [makeLines(40000, 'a'), makeLines(40000, 'b')],
+    [makeLines(70000, 'a'), makeLines(70000, 'b')],
+    // Shared lines interleaved with unique ones.
+    [makeLines(50000, 'a') + makeLines(1000, 'c'), makeLines(1000, 'c') + makeLines(50000, 'b')]
+  ];
+  for (var x = 0; x < cases.length; x++) {
+    var text1 = cases[x][0];
+    var text2 = cases[x][1];
+    var diffs = dmp.diff_main(text1, text2, true);
+    assertEquivalent([text1, text2], diff_rebuildtexts(diffs));
+    var patches = dmp.patch_make(text1, text2);
+    assertEquals(text2, dmp.patch_apply(patches, text1)[0]);
+  }
+}
+
 function testMatchAlphabet() {
   // Initialise the bitmasks for Bitap.
   // Unique.
@@ -1133,6 +1199,7 @@ var tests = [
     'testDiffLevenshtein',
     'testDiffBisect',
     'testDiffMain',
+    'testDiffMainManyLines',
 
     'testMatchAlphabet',
     'testMatchBitap',
