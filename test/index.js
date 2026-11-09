@@ -196,6 +196,32 @@ function testDiffLinesToChars() {
   assertEquals(n, chars.length);
   lineList.unshift('');
   assertLinesToCharsResultEquals({chars1: chars, chars2: '', lineArray: lineList}, dmp.diff_linesToChars_(lines, ''));
+
+  // While both texts fit in the 65535 line ids, every line gets its own id,
+  // even when text1 alone has more than 40000 unique lines.
+  var lines1 = [];
+  var lines2 = [];
+  for (var i = 0; i < 50000; i++) {
+    lines1.push('a' + i + '\n');
+  }
+  for (var i = 0; i < 15535; i++) {
+    lines2.push('b' + i + '\n');
+  }
+  var result = dmp.diff_linesToChars_(lines1.join(''), lines2.join(''));
+  assertEquals(50000, result.chars1.length);
+  assertEquals(15535, result.chars2.length);
+  assertEquals(65536, result.lineArray.length);
+  assertEquals('a49999\n', result.lineArray[result.chars1.charCodeAt(49999)]);
+  assertEquals('b15534\n', result.lineArray[result.chars2.charCodeAt(15534)]);
+
+  // One more unique line no longer fits: text1 keeps its first 39999 lines and
+  // the tail is collapsed into a single line; text2 gets the remaining ids.
+  lines2.push('b15535\n');
+  result = dmp.diff_linesToChars_(lines1.join(''), lines2.join(''));
+  assertEquals(40000, result.chars1.length);
+  assertEquals(lines1.slice(39999).join(''), result.lineArray[result.chars1.charCodeAt(39999)]);
+  assertEquals(15536, result.chars2.length);
+  assertTrue('lineArray within 16 bits', result.lineArray.length <= 65536);
 }
 
 function testDiffCharsToLines() {
@@ -220,6 +246,30 @@ function testDiffCharsToLines() {
   var diffs = [[DIFF_DELETE, chars]];
   dmp.diff_charsToLines_(diffs, lineList);
   assertEquivalent([[DIFF_DELETE, lines]], diffs);
+
+  // More than 65536 to verify any 16-bit limitation.
+  lineList = [];
+  for (var i = 0; i < 66000; i++) {
+    lineList[i] = i + '\n';
+  }
+  chars = lineList.join('');
+  var results = dmp.diff_linesToChars_(chars, '');
+  diffs = [[DIFF_INSERT, results.chars1]];
+  dmp.diff_charsToLines_(diffs, results.lineArray);
+  assertEquals(chars, diffs[0][1]);
+
+  // Same for text2, and with both texts combined exceeding 65536 unique lines.
+  var lineList2 = [];
+  for (var i = 0; i < 66000; i++) {
+    lineList2[i] = 'b' + i + '\n';
+  }
+  var chars2 = lineList2.join('');
+  results = dmp.diff_linesToChars_(chars, chars2);
+  assertTrue('lineArray within 16 bits', results.lineArray.length <= 65536);
+  diffs = [[DIFF_DELETE, results.chars1], [DIFF_INSERT, results.chars2]];
+  dmp.diff_charsToLines_(diffs, results.lineArray);
+  assertEquals(chars, diffs[0][1]);
+  assertEquals(chars2, diffs[1][1]);
 }
 
 function testDiffCleanupMerge() {
@@ -753,6 +803,128 @@ function testDiffMain() {
 // MATCH TEST FUNCTIONS
 
 
+function testDiffMainManyLines() {
+  // Line-mode diff must stay correct when the two texts together contain
+  // 65536 or more unique lines (String.fromCharCode wraps at 16 bits).
+  var dmp = new diff_match_patch();
+  dmp.Diff_Timeout = 0.1;
+
+  function makeLines(n, prefix) {
+    var list = [];
+    for (var i = 0; i < n; i++) {
+      list[i] = prefix + i.toString(36) + '\n';
+    }
+    return list.join('');
+  }
+
+  // Exactly 65536 unique lines: 98304 chars per text, 3 chars per line, with
+  // no common prefix/suffix so every line reaches diff_linesToChars_.
+  var boundary1 = [];
+  var boundary2 = [];
+  for (var i = 0; i < 32768; i++) {
+    boundary1.push(String.fromCharCode(0x4E00 + (i >> 8), 0x4E00 + (i & 255)) + '\n');
+  }
+  for (var j = 32767; j >= 0; j--) {
+    boundary2.push(String.fromCharCode(0x4F00 + (j >> 8), 0x4E00 + (j & 255)) + '\n');
+  }
+
+  var cases = [
+    [boundary1.join(''), boundary2.join('')],
+    [makeLines(40000, 'a'), makeLines(40000, 'b')],
+    [makeLines(70000, 'a'), makeLines(70000, 'b')],
+    // Shared lines interleaved with unique ones.
+    [makeLines(50000, 'a') + makeLines(1000, 'c'), makeLines(1000, 'c') + makeLines(50000, 'b')]
+  ];
+  for (var x = 0; x < cases.length; x++) {
+    var text1 = cases[x][0];
+    var text2 = cases[x][1];
+    var diffs = dmp.diff_main(text1, text2, true);
+    assertEquivalent([text1, text2], diff_rebuildtexts(diffs));
+    var patches = dmp.patch_make(text1, text2);
+    assertEquals(text2, dmp.patch_apply(patches, text1)[0]);
+  }
+}
+
+function testPatchMakeNearDocumentLimit() {
+  // HackMD's default note limit is 100,000 chars (200,000 for paid plans).
+  // Build notes made of many short, distinct lines near those limits and check
+  // that patches round-trip, both through diff_main and through the
+  // whole-document line diff HackMD uses for revisions
+  // (diff_linesToChars_ + diff_main(..., false) + diff_charsToLines_).
+  var dmp = new diff_match_patch();
+  dmp.Diff_Timeout = 0.1;
+
+  function lineModePatch(text1, text2) {
+    var a = dmp.diff_linesToChars_(text1, text2);
+    var diffs = dmp.diff_main(a.chars1, a.chars2, false);
+    dmp.diff_charsToLines_(diffs, a.lineArray);
+    dmp.diff_cleanupSemantic(diffs);
+    return dmp.patch_make(text1, diffs);
+  }
+
+  function libraryPatch(text1, text2) {
+    return dmp.patch_make(text1, dmp.diff_main(text1, text2));
+  }
+
+  function assertPatchRoundTrip(msg, patches, text1, text2) {
+    var applied = dmp.patch_apply(patches, text1);
+    assertEquals(msg, text2, applied[0]);
+    for (var i = 0; i < applied[1].length; i++) {
+      assertTrue(msg + ' hunk ' + i, applied[1][i]);
+    }
+  }
+
+  // Distinct 1-char lines ('X\n'), skipping surrogates.
+  function oneCharLines(n) {
+    var lines = [];
+    for (var i = 0, c = 0x100; i < n; i++, c++) {
+      if (c == 0xD800) {
+        c = 0xE000;
+      }
+      lines.push(String.fromCharCode(c) + '\n');
+    }
+    return lines;
+  }
+
+  // Distinct 2-char lines ('XY\n'); `set` selects a disjoint set of lines.
+  function twoCharLines(n, set) {
+    var lines = [];
+    for (var i = 0; i < n; i++) {
+      lines.push(String.fromCharCode(0x4E00 + set * 0x400 + (i >> 8),
+                                     0x4E00 + (i & 255)) + '\n');
+    }
+    return lines;
+  }
+
+  // 100,000 chars: 50,000 unique lines, one line edited near the end.  Fits in
+  // the line table, so the patch must stay small.
+  var lines = oneCharLines(50000);
+  var text1 = lines.join('');
+  lines[49995] = '\u4E00\u4E00\n';
+  var text2 = lines.join('');
+  var patches = lineModePatch(text1, text2);
+  assertPatchRoundTrip('100k line mode', patches, text1, text2);
+  assertTrue('100k line mode patch is small', dmp.patch_toText(patches).length < 1000);
+  assertPatchRoundTrip('100k diff_main', libraryPatch(text1, text2), text1, text2);
+
+  // 200,000 chars: 66,666 unique lines, more than the line table can hold.
+  lines = twoCharLines(66666, 0);
+  text1 = lines.join('');
+  var edits = {
+    'edit end': lines.slice(0, 66660).concat(twoCharLines(1, 1), lines.slice(66661)),
+    'edit middle': lines.slice(0, 33333).concat(twoCharLines(1, 1), lines.slice(33334)),
+    'edit every 50th line': lines.map(function(line, i) {
+      return i % 50 ? line : twoCharLines(i + 1, 1)[i];
+    }),
+    'replace all': twoCharLines(66666, 1).reverse()
+  };
+  for (var name in edits) {
+    text2 = edits[name].join('');
+    assertPatchRoundTrip('200k line mode, ' + name, lineModePatch(text1, text2), text1, text2);
+    assertPatchRoundTrip('200k diff_main, ' + name, libraryPatch(text1, text2), text1, text2);
+  }
+}
+
 function testMatchAlphabet() {
   // Initialise the bitmasks for Bitap.
   // Unique.
@@ -1133,6 +1305,8 @@ var tests = [
     'testDiffLevenshtein',
     'testDiffBisect',
     'testDiffMain',
+    'testDiffMainManyLines',
+    'testPatchMakeNearDocumentLimit',
 
     'testMatchAlphabet',
     'testMatchBitap',
