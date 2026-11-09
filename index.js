@@ -443,19 +443,21 @@ diff_match_patch.prototype.diff_bisectSplit_ = function(text1, text2, x, y,
  * @private
  */
 diff_match_patch.prototype.diff_linesToChars_ = function(text1, text2) {
-  var lineArray = [];  // e.g. lineArray[4] == 'Hello\n'
-  var lineHash = {};   // e.g. lineHash['Hello\n'] == 4
+  // Each unique line is encoded as one UTF-16 code unit, so at most 65535
+  // line ids are available (String.fromCharCode(65536) == '\x00').
+  var MAX_LINE_ID = 65535;
 
-  // '\x00' is a valid character, but various debuggers don't like it.
-  // So we'll insert a junk entry to avoid generating a null character.
-  lineArray[0] = '';
+  var lineArray;  // e.g. lineArray[4] == 'Hello\n'
+  var lineHash;   // e.g. lineHash['Hello\n'] == 4
+  var maxLines;   // Once lineArray reaches this length, collapse the rest.
+  var abortOnOverflow;  // Return null instead of collapsing the rest.
 
   /**
    * Split a text into an array of strings.  Reduce the texts to a string of
    * hashes where each Unicode character represents one line.
    * Modifies linearray and linehash through being a closure.
    * @param {string} text String to encode.
-   * @return {string} Encoded string.
+   * @return {?string} Encoded string, or null if aborted on overflow.
    * @private
    */
   function diff_linesToCharsMunge_(text) {
@@ -479,9 +481,11 @@ diff_match_patch.prototype.diff_linesToChars_ = function(text1, text2) {
         chars += String.fromCharCode(lineHash[line]);
       } else {
         if (lineArrayLength == maxLines) {
-          // Bail out at 65535 because
-          // String.fromCharCode(65536) == String.fromCharCode(0)
-          // Treat the rest of the text as a single (final) line.
+          // Out of line ids: treat the rest of the text as a single (final)
+          // line.  The diff stays correct, just coarser for this tail.
+          if (abortOnOverflow) {
+            return null;
+          }
           line = text.substring(lineStart);
           lineEnd = text.length;
         }
@@ -494,12 +498,42 @@ diff_match_patch.prototype.diff_linesToChars_ = function(text1, text2) {
     return chars;
   }
 
-  // Allocate 2/3rds of the space for text1, the rest for text2.
-  var maxLines = 40000;
-  var chars1 = diff_linesToCharsMunge_(text1);
-  maxLines = 65535;
-  var chars2 = diff_linesToCharsMunge_(text2);
-  return {chars1: chars1, chars2: chars2, lineArray: lineArray};
+  /**
+   * Encode both texts with a shared line table.
+   * @param {number} text1MaxLines maxLines while encoding text1.
+   * @param {number} text2MaxLines maxLines while encoding text2.
+   * @param {boolean} abort Give up (return null) instead of collapsing.
+   * @return {?{chars1: string, chars2: string, lineArray: !Array.<string>}}
+   */
+  function diff_linesToCharsEncode_(text1MaxLines, text2MaxLines, abort) {
+    // '\x00' is a valid character, but various debuggers don't like it.
+    // So we'll insert a junk entry to avoid generating a null character.
+    lineArray = [''];
+    lineHash = {};
+    abortOnOverflow = abort;
+    maxLines = text1MaxLines;
+    var chars1 = diff_linesToCharsMunge_(text1);
+    if (chars1 === null) {
+      return null;
+    }
+    maxLines = text2MaxLines;
+    var chars2 = diff_linesToCharsMunge_(text2);
+    if (chars2 === null) {
+      return null;
+    }
+    return {chars1: chars1, chars2: chars2, lineArray: lineArray};
+  }
+
+  // If all unique lines of both texts fit in the table (ids 1..65535), encode
+  // every line individually, exactly like an unbounded encoding would.
+  var result = diff_linesToCharsEncode_(MAX_LINE_ID + 1, MAX_LINE_ID + 1, true);
+  if (result === null) {
+    // Too many unique lines.  Like upstream diff-match-patch, allocate 2/3rds
+    // of the ids to text1 and the rest to text2; whatever doesn't fit is
+    // collapsed into one final line per text.
+    result = diff_linesToCharsEncode_(40000, MAX_LINE_ID, false);
+  }
+  return result;
 };
 
 
